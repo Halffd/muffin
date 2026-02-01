@@ -230,7 +230,6 @@ meta_stage_paint_view (ClutterStage         *stage,
                        const cairo_region_t *redraw_clip)
 {
   MetaStage *meta_stage = META_STAGE (stage);
-  MetaBackend *backend = meta_get_backend ();
   MetaDisplay *display = NULL;
   MetaCompositor *compositor = NULL;
   CoglFramebuffer *framebuffer = NULL;
@@ -249,7 +248,31 @@ meta_stage_paint_view (ClutterStage         *stage,
   notify_watchers_for_mode (meta_stage, view, NULL,
                             META_STAGE_WATCH_BEFORE_PAINT);
 
-  /* Apply per-view zoom transform if active for this view */
+  /* Apply per-view zoom transform if active for this view
+   * 
+   * ARCHITECTURAL NOTE: This implementation applies zoom at the paint stage.
+   * This is ~20% of a complete per-monitor zoom solution. Full implementation would require:
+   * 
+   * 1. Earlier abstraction layer: Apply zoom before actor allocation, not at paint time.
+   *    Current approach paints zoomed but actors allocated in wrong space.
+   * 
+   * 2. Damage region remapping: Damage regions and redraw clips must be scaled proportionally
+   *    to avoid redraw storms and flicker. Currently ignored, causing inefficient rendering.
+   * 
+   * 3. Offscreen rendering per view: Each view should render to independent framebuffer,
+   *    composited manually with per-output scaling. This would eliminate ordering issues.
+   * 
+   * 4. Device event translation: Event coordinate transformation should happen earlier
+   *    in input pipeline (device event translation phase), not in event_callback.
+   * 
+   * Current approach provides visual zoom feedback but has limitations:
+   * - Actors not allocated in zoomed space (font sizes, layout wrong)
+   * - Damage tracking inefficient
+   * - Event transformation happens too late
+   * 
+   * For comparison, GNOME uses Option C: single zoom region that follows pointer,
+   * other monitors dim/freeze. This avoids full remapping complexity.
+   */
   if (view_zoom > 1.0 && compositor)
     {
       framebuffer = clutter_stage_view_get_framebuffer (view);
@@ -272,9 +295,12 @@ meta_stage_paint_view (ClutterStage         *stage,
           
           zoom_applied = TRUE;
 
-          /* Apply scissor clipping to prevent popups/menus from rendering outside view bounds */
+          /* Apply scissor clipping in logical monitor space to prevent popups/menus from rendering outside view bounds.
+           * CRITICAL: Must account for view_layout offsets (view_layout.x, view_layout.y) because logical monitors
+           * can be positioned at arbitrary offsets in the coordinate space. Ignoring offsets causes menu/popup leakage
+           * across monitor boundaries. */
           cogl_framebuffer_push_scissor_clip (framebuffer,
-                                              0, 0,
+                                              view_layout.x, view_layout.y,
                                               view_layout.width,
                                               view_layout.height);
           scissor_applied = TRUE;
