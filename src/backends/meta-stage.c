@@ -232,6 +232,10 @@ meta_stage_paint_view (ClutterStage         *stage,
   notify_watchers_for_mode (meta_stage, view, NULL,
                             META_STAGE_WATCH_BEFORE_PAINT);
 
+  /* NOTE: Per-view zoom application will be integrated here in the future.
+     For now, zoom is applied through the compositor's view zoom state
+     which gets queried during the render pipeline. */
+
   CLUTTER_STAGE_CLASS (meta_stage_parent_class)->paint_view (stage, view,
                                                              redraw_clip);
 

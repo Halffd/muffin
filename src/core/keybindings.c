@@ -4018,6 +4018,62 @@ handle_lower (MetaDisplay     *display,
 }
 
 static void
+handle_reset_zoom (MetaDisplay     *display,
+                   MetaWindow      *window,
+                   ClutterKeyEvent *event,
+                   MetaKeyBinding  *binding,
+                   gpointer         dummy)
+{
+  /* Reset accessibility zoom to 1.0 (no zoom) */
+  meta_display_reset_a11y_zoom (display);
+}
+
+static void
+handle_zoom_in (MetaDisplay     *display,
+                MetaWindow      *window,
+                ClutterKeyEvent *event,
+                MetaKeyBinding  *binding,
+                gpointer         dummy)
+{
+  /* Zoom in by 1.6x */
+  meta_display_a11y_zoom (display, TRUE);
+}
+
+static void
+handle_zoom_out (MetaDisplay     *display,
+                 MetaWindow      *window,
+                 ClutterKeyEvent *event,
+                 MetaKeyBinding  *binding,
+                 gpointer         dummy)
+{
+  /* Zoom out */
+  meta_display_a11y_zoom (display, FALSE);
+}
+
+static void
+handle_zoom_reset (MetaDisplay     *display,
+                   MetaWindow      *window,
+                   ClutterKeyEvent *event,
+                   MetaKeyBinding  *binding,
+                   gpointer         dummy)
+{
+  /* Reset zoom to 1.0 */
+  meta_display_reset_a11y_zoom (display);
+}
+
+static void
+handle_zoom_toggle_mode (MetaDisplay     *display,
+                         MetaWindow      *window,
+                         ClutterKeyEvent *event,
+                         MetaKeyBinding  *binding,
+                         gpointer         dummy)
+{
+  /* Toggle zoom mode */
+  /* In a real implementation, this would toggle between different zoom modes */
+  meta_verbose ("Toggle zoom mode\n");
+}
+
+static void
 handle_set_spew_mark (MetaDisplay     *display,
                       MetaWindow      *window,
                       ClutterKeyEvent *event,
@@ -4965,6 +5021,34 @@ init_builtin_key_bindings (MetaDisplay *display)
                           META_KEY_BINDING_PER_WINDOW,
                           META_KEYBINDING_ACTION_DECREASE_OPACITY,
                           handle_opacity, 0);
+
+  add_builtin_keybinding (display,
+                          "reset-zoom",
+                          common_keybindings,
+                          META_KEY_BINDING_NONE,
+                          META_KEYBINDING_ACTION_ZOOM_RESET,
+                          handle_reset_zoom, 0);
+
+  add_builtin_keybinding (display,
+                          "zoom-in",
+                          common_keybindings,
+                          META_KEY_BINDING_NONE,
+                          META_KEYBINDING_ACTION_ZOOM_IN,
+                          handle_zoom_in, 0);
+
+  add_builtin_keybinding (display,
+                          "zoom-out",
+                          common_keybindings,
+                          META_KEY_BINDING_NONE,
+                          META_KEYBINDING_ACTION_ZOOM_OUT,
+                          handle_zoom_out, 0);
+
+  add_builtin_keybinding (display,
+                          "toggle-zoom-mode",
+                          common_keybindings,
+                          META_KEY_BINDING_NONE,
+                          META_KEYBINDING_ACTION_ZOOM_TOGGLE_MODE,
+                          handle_zoom_toggle_mode, 0);
 
   g_object_unref (common_keybindings);
   g_object_unref (muffin_keybindings);
