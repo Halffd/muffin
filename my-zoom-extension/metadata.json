@@ -1,0 +1,9 @@
+[Extension]
+Uuid=zoom-control@muffin-extension
+Name=Zoom Control Extension
+Description=Provides zoom control functionality with hooks into global.display, Main.wm, and AltTab.WindowSwitcherPopup
+X-Cinnamon-Version=5.0
+
+[X-Applet-Settings]
+MaximizeOnKeypadPlus=False
+MinimizeOnKeypadMinus=False

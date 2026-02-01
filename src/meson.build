@@ -792,6 +792,18 @@ if have_remote_desktop
       namespace: 'MetaDBus',
     )
   muffin_built_sources += dbus_screen_cast_built_sources
+
+  dbus_zoom_built_sources = gnome.gdbus_codegen('meta-dbus-zoom',
+      'org.cinnamon.Muffin.Zoom.xml',
+      interface_prefix: 'org.cinnamon.Muffin.',
+      namespace: 'MetaDBus',
+    )
+  muffin_built_sources += dbus_zoom_built_sources
+
+  muffin_built_sources += [
+    'backends/meta-zoom-dbus.c',
+    'backends/meta-zoom-dbus.h',
+  ]
 endif
 
 wayland_protocol_server_headers = []
