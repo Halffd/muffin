@@ -60,6 +60,8 @@
 #include "backends/x11/meta-backend-x11.h"
 #include "backends/x11/meta-event-x11.h"
 #include "backends/x11/meta-stage-x11.h"
+#include "backends/meta-cursor-tracker-private.h"
+#include "backends/meta-renderer.h"
 #include "clutter/clutter-muffin.h"
 #include "cogl/cogl.h"
 #include "compositor/meta-window-actor-x11.h"
@@ -75,6 +77,7 @@
 #include "meta/meta-backend.h"
 #include "meta/meta-background-actor.h"
 #include "meta/meta-background-group.h"
+#include "meta/meta-cursor-tracker.h"
 #include "meta/meta-shadow-factory.h"
 #include "meta/meta-x11-errors.h"
 #include "meta/meta-x11-background-actor.h"
@@ -132,6 +135,10 @@ typedef struct _MetaCompositorPrivate
   int switch_workspace_in_progress;
 
   MetaPluginManager *plugin_mgr;
+
+  /* Per-view zoom state */
+  GHashTable *view_zoom_levels;  /* key: ClutterStageView*, value: gdouble* */
+  gboolean view_zoom_active;     /* Track if any view is zoomed */
 } MetaCompositorPrivate;
 
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE (MetaCompositor, meta_compositor,
@@ -201,6 +208,169 @@ get_compositor_for_display (MetaDisplay *display)
 {
   return display->compositor;
 }
+
+/* Per-view zoom helper functions */
+
+/**
+ * Get zoom level for a given stage view.
+ */
+static gdouble
+get_view_zoom_level (MetaCompositor  *compositor,
+                     ClutterStageView *view)
+{
+  MetaCompositorPrivate *priv = meta_compositor_get_instance_private (compositor);
+  gdouble *zoom_ptr;
+
+  if (!priv->view_zoom_levels || !view)
+    return 1.0;
+
+  zoom_ptr = g_hash_table_lookup (priv->view_zoom_levels, view);
+  if (zoom_ptr)
+    return *zoom_ptr;
+
+  return 1.0;
+}
+
+/**
+ * Set zoom level for a given stage view.
+ */
+static void
+set_view_zoom_level (MetaCompositor   *compositor,
+                     ClutterStageView *view,
+                     gdouble           zoom)
+{
+  MetaCompositorPrivate *priv = meta_compositor_get_instance_private (compositor);
+  gdouble *zoom_ptr;
+
+  if (!view)
+    return;
+
+  if (!priv->view_zoom_levels)
+    {
+      priv->view_zoom_levels = g_hash_table_new_full (g_direct_hash,
+                                                      g_direct_equal,
+                                                      NULL,
+                                                      g_free);
+    }
+
+  zoom_ptr = g_new (gdouble, 1);
+  *zoom_ptr = CLAMP (zoom, 1.0, 16.0);
+
+  g_hash_table_replace (priv->view_zoom_levels, view, zoom_ptr);
+
+  /* Update view_zoom_active: true if any view is zoomed */
+  GHashTableIter iter;
+  gdouble *val;
+  gboolean any_zoomed = FALSE;
+
+  g_hash_table_iter_init (&iter, priv->view_zoom_levels);
+  while (g_hash_table_iter_next (&iter, NULL, (gpointer *) &val))
+    {
+      if (*val > 1.0)
+        {
+          any_zoomed = TRUE;
+          break;
+        }
+    }
+
+  priv->view_zoom_active = any_zoomed;
+}
+
+/**
+ * Get the view under the cursor position.
+ */
+static ClutterStageView *
+get_view_for_cursor_position (MetaCompositor *compositor,
+                              MetaDisplay    *display)
+{
+  MetaBackend *backend = meta_get_backend ();
+  MetaRenderer *renderer = meta_backend_get_renderer (backend);
+  MetaCursorTracker *cursor_tracker;
+  GList *views, *l;
+  int cursor_x, cursor_y;
+
+  cursor_tracker = meta_cursor_tracker_get_for_display (display);
+  if (!cursor_tracker)
+    {
+      /* Fallback: return first view */
+      views = meta_renderer_get_views (renderer);
+      return views ? views->data : NULL;
+    }
+
+  meta_cursor_tracker_get_pointer (cursor_tracker, &cursor_x, &cursor_y, NULL);
+
+  views = meta_renderer_get_views (renderer);
+  for (l = views; l; l = l->next)
+    {
+      ClutterStageView *view = l->data;
+      MetaRectangle view_layout;
+
+      clutter_stage_view_get_layout (view, &view_layout);
+
+      if (cursor_x >= view_layout.x &&
+          cursor_x < view_layout.x + view_layout.width &&
+          cursor_y >= view_layout.y &&
+          cursor_y < view_layout.y + view_layout.height)
+        {
+          return view;
+        }
+    }
+
+  /* Return first view if cursor is out of bounds */
+  return views ? views->data : NULL;
+}
+
+/* Zoom signal handlers - per-view zoom */
+static void
+on_zoom_scroll_in (MetaDisplay    *display,
+                   MetaCompositor *compositor)
+{
+  ClutterStageView *view;
+  gdouble current_zoom;
+  gdouble new_zoom;
+
+  /* Find which view is under the cursor */
+  view = get_view_for_cursor_position (compositor, display);
+  if (!view)
+    return;
+
+  current_zoom = get_view_zoom_level (compositor, view);
+  new_zoom = current_zoom * 1.1;
+
+  set_view_zoom_level (compositor, view, new_zoom);
+}
+
+static void
+on_zoom_scroll_out (MetaDisplay    *display,
+                    MetaCompositor *compositor)
+{
+  ClutterStageView *view;
+  gdouble current_zoom;
+  gdouble new_zoom;
+
+  /* Find which view is under the cursor */
+  view = get_view_for_cursor_position (compositor, display);
+  if (!view)
+    return;
+
+  current_zoom = get_view_zoom_level (compositor, view);
+  new_zoom = current_zoom / 1.1;
+
+  set_view_zoom_level (compositor, view, new_zoom);
+}
+
+static void
+on_zoom_reset (MetaDisplay    *display,
+               MetaCompositor *compositor)
+{
+  MetaCompositorPrivate *priv = meta_compositor_get_instance_private (compositor);
+
+  if (priv->view_zoom_levels)
+    g_hash_table_remove_all (priv->view_zoom_levels);
+
+  priv->view_zoom_active = FALSE;
+}
+
 
 /**
  * meta_get_stage_for_display:
@@ -621,6 +791,14 @@ meta_compositor_manage (MetaCompositor *compositor)
   META_COMPOSITOR_GET_CLASS (compositor)->manage (compositor);
 
   priv->plugin_mgr = meta_plugin_manager_new (compositor);
+
+  /* Connect to zoom signals */
+  g_signal_connect (display, "zoom-scroll-in",
+                    G_CALLBACK (on_zoom_scroll_in), compositor);
+  g_signal_connect (display, "zoom-scroll-out",
+                    G_CALLBACK (on_zoom_scroll_out), compositor);
+  g_signal_connect (display, "zoom-reset",
+                    G_CALLBACK (on_zoom_reset), compositor);
 
   clutter_actor_show (priv->stage);
 }
@@ -1415,6 +1593,7 @@ meta_compositor_dispose (GObject *object)
   g_clear_pointer (&priv->top_window_group, clutter_actor_destroy);
   g_clear_pointer (&priv->feedback_group, clutter_actor_destroy);
   g_clear_pointer (&priv->windows, g_list_free);
+  g_clear_pointer (&priv->view_zoom_levels, g_hash_table_unref);
 
   G_OBJECT_CLASS (meta_compositor_parent_class)->dispose (object);
 }
@@ -1780,4 +1959,53 @@ meta_update_desklet_stacking (MetaCompositor *compositor)
     meta_compositor_get_instance_private (compositor);
 
   meta_stack_tracker_queue_sync_stack (priv->display->stack_tracker);
+}
+
+/**
+ * meta_compositor_get_view_zoom:
+ * @compositor: a #MetaCompositor
+ * @view: a #ClutterStageView
+ *
+ * Get the zoom level for a specific stage view.
+ *
+ * Returns: The zoom level (1.0 = no zoom, > 1.0 = zoomed in)
+ */
+gdouble
+meta_compositor_get_view_zoom (MetaCompositor   *compositor,
+                                ClutterStageView *view)
+{
+  return get_view_zoom_level (compositor, view);
+}
+
+/**
+ * meta_compositor_set_view_zoom:
+ * @compositor: a #MetaCompositor
+ * @view: a #ClutterStageView
+ * @zoom: the zoom level to set
+ *
+ * Set the zoom level for a specific stage view.
+ */
+void
+meta_compositor_set_view_zoom (MetaCompositor   *compositor,
+                                ClutterStageView *view,
+                                gdouble           zoom)
+{
+  set_view_zoom_level (compositor, view, zoom);
+}
+
+/**
+ * meta_compositor_is_view_zoom_active:
+ * @compositor: a #MetaCompositor
+ *
+ * Check if zoom is active on any view.
+ *
+ * Returns: TRUE if any view is zoomed, FALSE otherwise
+ */
+gboolean
+meta_compositor_is_view_zoom_active (MetaCompositor *compositor)
+{
+  MetaCompositorPrivate *priv =
+    meta_compositor_get_instance_private (compositor);
+
+  return priv->view_zoom_active;
 }

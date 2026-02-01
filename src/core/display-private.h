@@ -227,6 +227,12 @@ struct _MetaDisplay
   MetaSelection *selection;
 
   gboolean desklets_above;
+
+  /* Zoom state */
+  gdouble current_zoom_level;  /* Global zoom level for backward compatibility */
+  gboolean zoom_active;        /* Global zoom active for backward compatibility */
+  gboolean zoom_follows_focus;
+  GHashTable *monitor_zoom_levels;  /* Per-monitor zoom levels: key=monitor ID (gint), value=gdouble* */
 };
 
 struct _MetaDisplayClass
@@ -416,7 +422,32 @@ gboolean meta_display_init_x11_finish (MetaDisplay   *display,
 
 void     meta_display_shutdown_x11 (MetaDisplay  *display);
 
+META_EXPORT
 void meta_display_a11y_zoom (MetaDisplay *display, gboolean in);
+
+META_EXPORT
+void meta_display_reset_a11y_zoom (MetaDisplay *display);
+
+void meta_display_a11y_zoom_for_monitor (MetaDisplay *display, gboolean in, MetaLogicalMonitor *logical_monitor);
+
+META_EXPORT
+gdouble meta_display_get_zoom_level (MetaDisplay *display);
+
+META_EXPORT
+gdouble meta_display_get_zoom_level_for_monitor (MetaDisplay *display, MetaLogicalMonitor *logical_monitor);
+
+META_EXPORT
+gboolean meta_display_get_zoom_active (MetaDisplay *display);
+
+META_EXPORT
+gboolean meta_display_get_zoom_active_for_monitor (MetaDisplay *display, MetaLogicalMonitor *logical_monitor);
+
+META_EXPORT
+void meta_display_set_zoom_level (MetaDisplay *display, gdouble level);
+
+void meta_display_set_zoom_level_for_monitor (MetaDisplay *display, gdouble level, MetaLogicalMonitor *logical_monitor);
+
+void meta_display_connect_zoom_handlers (MetaDisplay *display);
 
 const gchar *meta_display_get_tile_mode_str (MetaTileMode mode);
 

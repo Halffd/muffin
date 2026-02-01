@@ -32,6 +32,7 @@
 #include "core/keybindings-private.h"
 #include "core/window-private.h"
 #include "meta/meta-backend.h"
+#include "backends/meta-monitor-manager-private.h"
 
 #ifdef HAVE_NATIVE_BACKEND
 #include "backends/native/meta-backend-native.h"
@@ -278,14 +279,29 @@ meta_display_handle_event (MetaDisplay        *display,
       if (meta_prefs_get_mouse_zoom_enabled () &&
           ((event->scroll.modifier_state & ~meta_keybindings_get_ignored_modifier_mask (display)) == meta_keybindings_get_mouse_zoom_modifiers (display)))
       {
+        MetaLogicalMonitor *logical_monitor = NULL;
+        MetaMonitorManager *monitor_manager;
+
+        /* Get the monitor where the scroll event occurred */
+        monitor_manager = meta_backend_get_monitor_manager (meta_get_backend ());
+        logical_monitor = meta_monitor_manager_get_logical_monitor_at (monitor_manager,
+                                                                     event->scroll.x,
+                                                                     event->scroll.y);
+
         if (clutter_event_get_scroll_direction (event) == CLUTTER_SCROLL_UP)
           {
-            meta_display_a11y_zoom (display, TRUE);
+            if (logical_monitor)
+              meta_display_a11y_zoom_for_monitor (display, TRUE, logical_monitor);
+            else
+              meta_display_a11y_zoom (display, TRUE);
           }
         else
         if (clutter_event_get_scroll_direction (event) == CLUTTER_SCROLL_DOWN)
           {
-            meta_display_a11y_zoom (display, FALSE);
+            if (logical_monitor)
+              meta_display_a11y_zoom_for_monitor (display, FALSE, logical_monitor);
+            else
+              meta_display_a11y_zoom (display, FALSE);
           }
 
         bypass_wayland = bypass_clutter = TRUE;

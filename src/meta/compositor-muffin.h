@@ -66,4 +66,15 @@ ClutterActor *meta_get_x11_background_actor_for_display (MetaDisplay *display);
 META_EXPORT
 ClutterActor *meta_get_desklet_container_for_display (MetaDisplay *display);
 
+/* Per-view zoom API */
+gdouble meta_compositor_get_view_zoom (MetaCompositor   *compositor,
+                                        ClutterStageView *view);
+
+void meta_compositor_set_view_zoom (MetaCompositor   *compositor,
+                                     ClutterStageView *view,
+                                     gdouble           zoom);
+
+gboolean meta_compositor_is_view_zoom_active (MetaCompositor *compositor);
+
 #endif
+

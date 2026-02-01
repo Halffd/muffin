@@ -44,6 +44,7 @@
 #include "backends/meta-cursor-sprite-xcursor.h"
 #include "backends/meta-cursor-tracker-private.h"
 #include "backends/meta-idle-monitor-dbus.h"
+#include "backends/meta-zoom-dbus.h"
 #include "backends/meta-input-device-private.h"
 #include "backends/meta-input-settings-private.h"
 #include "backends/meta-logical-monitor.h"
@@ -122,6 +123,8 @@ typedef struct
   guint       ping_timeout_id;
 } MetaPingData;
 
+static void meta_display_finalize (GObject *object);
+
 G_DEFINE_TYPE(MetaDisplay, meta_display, G_TYPE_OBJECT);
 
 /* Signals */
@@ -164,6 +167,7 @@ enum
   INIT_XSERVER,
   ZOOM_SCROLL_IN,
   ZOOM_SCROLL_OUT,
+  ZOOM_RESET,
   LAST_SIGNAL
 };
 
@@ -235,6 +239,7 @@ meta_display_class_init (MetaDisplayClass *klass)
 
   object_class->get_property = meta_display_get_property;
   object_class->set_property = meta_display_set_property;
+  object_class->finalize = meta_display_finalize;
 
   display_signals[CURSOR_UPDATED] =
     g_signal_new ("cursor-updated",
@@ -561,6 +566,13 @@ meta_display_class_init (MetaDisplayClass *klass)
                   0, NULL, NULL, NULL,
                   G_TYPE_NONE, 0);
 
+  display_signals[ZOOM_RESET] =
+    g_signal_new ("zoom-reset",
+                  G_TYPE_FROM_CLASS (klass),
+                  G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL,
+                  G_TYPE_NONE, 0);
+
   g_object_class_install_property (object_class,
                                    PROP_FOCUS_WINDOW,
                                    g_param_spec_object ("focus-window",
@@ -569,6 +581,17 @@ meta_display_class_init (MetaDisplayClass *klass)
                                                         META_TYPE_WINDOW,
                                                         G_PARAM_READABLE));
 
+}
+
+
+static void
+meta_display_finalize (GObject *object)
+{
+  MetaDisplay *display = META_DISPLAY (object);
+
+  g_clear_pointer (&display->monitor_zoom_levels, g_hash_table_unref);
+
+  G_OBJECT_CLASS (meta_display_parent_class)->finalize (object);
 }
 
 
@@ -665,8 +688,15 @@ enable_compositor (MetaDisplay *display)
 static void
 meta_display_init (MetaDisplay *disp)
 {
-  /* Some stuff could go in here that's currently in _open,
-   * but it doesn't really matter. */
+  disp->current_zoom_level = 1.0;
+  disp->zoom_active = FALSE;
+  disp->zoom_follows_focus = FALSE;
+
+  /* Initialize per-monitor zoom levels hash table */
+  disp->monitor_zoom_levels = g_hash_table_new_full (g_direct_hash,
+                                                    g_direct_equal,
+                                                    NULL,
+                                                    g_free);
 }
 
 void
@@ -914,6 +944,11 @@ meta_display_open (void)
   display->grab_tile_mode = META_TILE_NONE;
   display->grab_tile_monitor_number = -1;
 
+  /* Initialize zoom state */
+  display->current_zoom_level = 1.0;
+  display->zoom_active = FALSE;
+  display->zoom_follows_focus = TRUE;
+
   meta_display_cleanup_edges (display);
 
   meta_display_init_keys (display);
@@ -1017,12 +1052,26 @@ meta_display_open (void)
 
   meta_idle_monitor_init_dbus ();
 
+  /* Initialize zoom DBus interface only if accessibility features are enabled */
+  if (meta_prefs_get_gnome_accessibility() && meta_prefs_get_mouse_zoom_enabled())
+    {
+      MetaZoomDBus *zoom_dbus = meta_zoom_dbus_new (display);
+      /* The zoom_dbus object manages its own lifecycle via g_bus_own_name */
+      if (zoom_dbus)
+        {
+          g_object_unref (zoom_dbus); /* Release the initial reference */
+        }
+    }
+
   display->sound_player = g_object_new (META_TYPE_SOUND_PLAYER, NULL);
 
   meta_input_settings_refresh (meta_backend_get_input_settings (backend));
 
   /* Done opening new display */
   display->display_opening = FALSE;
+
+  /* Connect zoom signal handlers */
+  meta_display_connect_zoom_handlers (display);
 
   return TRUE;
 }
@@ -3993,7 +4042,254 @@ meta_display_get_selection (MetaDisplay *display)
 void
 meta_display_a11y_zoom (MetaDisplay *display, gboolean in)
 {
+  /* For backward compatibility, also update the global zoom level */
+  if (in)
+  {
+    /* Zoom in - increase zoom level by 1.6x factor */
+    display->current_zoom_level *= 1.6;
+    if (display->current_zoom_level > 16.0) /* Max zoom level */
+      display->current_zoom_level = 16.0;
+    display->zoom_active = TRUE;
+  }
+  else
+  {
+    /* Zoom out - decrease zoom level by 1.6x factor */
+    display->current_zoom_level /= 1.6;
+    if (display->current_zoom_level < 1.0) /* Min zoom level */
+      display->current_zoom_level = 1.0;
+    if (display->current_zoom_level <= 1.0)
+      display->zoom_active = FALSE;
+  }
+
   g_signal_emit (display, display_signals[in ? ZOOM_SCROLL_IN : ZOOM_SCROLL_OUT], 0);
+}
+
+void
+meta_display_reset_a11y_zoom (MetaDisplay *display)
+{
+  /* Reset global zoom to 1.0 */
+  display->current_zoom_level = 1.0;
+  display->zoom_active = FALSE;
+
+  /* Also reset all per-monitor zoom levels */
+  g_hash_table_remove_all (display->monitor_zoom_levels);
+
+  g_signal_emit (display, display_signals[ZOOM_RESET], 0);
+}
+
+void
+meta_display_a11y_zoom_for_monitor (MetaDisplay *display, gboolean in, MetaLogicalMonitor *logical_monitor)
+{
+  gdouble *zoom_level_ptr;
+  gdouble current_level;
+  gint monitor_id;
+
+  /* Use the monitor's index as a stable ID */
+  monitor_id = logical_monitor->number;
+
+  /* Get current zoom level for this monitor, or use global level if not set */
+  zoom_level_ptr = g_hash_table_lookup (display->monitor_zoom_levels, GINT_TO_POINTER(monitor_id));
+  if (zoom_level_ptr)
+    current_level = *zoom_level_ptr;
+  else
+    current_level = 1.0; /* Default zoom level */
+
+  if (in)
+  {
+    /* Zoom in - increase zoom level by 1.6x factor */
+    current_level *= 1.6;
+    if (current_level > 16.0) /* Max zoom level */
+      current_level = 16.0;
+  }
+  else
+  {
+    /* Zoom out - decrease zoom level by 1.6x factor */
+    current_level /= 1.6;
+    if (current_level < 1.0) /* Min zoom level */
+      current_level = 1.0;
+  }
+
+  /* Store the new zoom level for this monitor */
+  zoom_level_ptr = g_new (gdouble, 1);
+  *zoom_level_ptr = current_level;
+  g_hash_table_insert (display->monitor_zoom_levels, GINT_TO_POINTER(monitor_id), zoom_level_ptr);
+
+  /* Update global zoom active flag if any monitor has zoom active */
+  display->zoom_active = (current_level > 1.0);
+
+  g_signal_emit (display, display_signals[in ? ZOOM_SCROLL_IN : ZOOM_SCROLL_OUT], 0);
+}
+
+/**
+ * meta_display_get_zoom_level:
+ * @display: a #MetaDisplay
+ *
+ * Gets the current global zoom level.
+ *
+ * Returns: Current zoom level
+ */
+gdouble
+meta_display_get_zoom_level (MetaDisplay *display)
+{
+  return display->current_zoom_level;
+}
+
+/**
+ * meta_display_get_zoom_level_for_monitor:
+ * @display: a #MetaDisplay
+ * @logical_monitor: a #MetaLogicalMonitor
+ *
+ * Gets the current zoom level for a specific monitor.
+ *
+ * Returns: Current zoom level for the monitor
+ */
+gdouble
+meta_display_get_zoom_level_for_monitor (MetaDisplay *display, MetaLogicalMonitor *logical_monitor)
+{
+  gdouble *zoom_level_ptr;
+  gint monitor_id;
+
+  monitor_id = logical_monitor->number;
+  zoom_level_ptr = g_hash_table_lookup (display->monitor_zoom_levels, GINT_TO_POINTER(monitor_id));
+  if (zoom_level_ptr)
+    return *zoom_level_ptr;
+  else
+    return 1.0; /* Default zoom level */
+}
+
+/**
+ * meta_display_get_zoom_active:
+ * @display: a #MetaDisplay
+ *
+ * Checks if zoom is currently active globally.
+ *
+ * Returns: %TRUE if zoom is active, %FALSE otherwise
+ */
+gboolean
+meta_display_get_zoom_active (MetaDisplay *display)
+{
+  return display->zoom_active;
+}
+
+/**
+ * meta_display_get_zoom_active_for_monitor:
+ * @display: a #MetaDisplay
+ * @logical_monitor: a #MetaLogicalMonitor
+ *
+ * Checks if zoom is currently active for a specific monitor.
+ *
+ * Returns: %TRUE if zoom is active for the monitor, %FALSE otherwise
+ */
+gboolean
+meta_display_get_zoom_active_for_monitor (MetaDisplay *display, MetaLogicalMonitor *logical_monitor)
+{
+  gdouble *zoom_level_ptr;
+  gint monitor_id;
+
+  monitor_id = logical_monitor->number;
+  zoom_level_ptr = g_hash_table_lookup (display->monitor_zoom_levels, GINT_TO_POINTER(monitor_id));
+  if (zoom_level_ptr)
+    return (*zoom_level_ptr > 1.0);
+  else
+    return FALSE; /* Default zoom level is 1.0, so not active */
+}
+
+/**
+ * meta_display_set_zoom_level:
+ * @display: a #MetaDisplay
+ * @level: zoom level to set
+ *
+ * Sets the global zoom level.
+ */
+void
+meta_display_set_zoom_level (MetaDisplay *display, gdouble level)
+{
+  if (level < 1.0)
+    level = 1.0;
+  else if (level > 16.0)
+    level = 16.0;
+
+  display->current_zoom_level = level;
+  display->zoom_active = (level > 1.0);
+}
+
+/**
+ * meta_display_set_zoom_level_for_monitor:
+ * @display: a #MetaDisplay
+ * @level: zoom level to set
+ * @logical_monitor: a #MetaLogicalMonitor
+ *
+ * Sets the zoom level for a specific monitor.
+ */
+void
+meta_display_set_zoom_level_for_monitor (MetaDisplay *display, gdouble level, MetaLogicalMonitor *logical_monitor)
+{
+  gdouble *zoom_level_ptr;
+  gint monitor_id;
+
+  if (level < 1.0)
+    level = 1.0;
+  else if (level > 16.0)
+    level = 16.0;
+
+  monitor_id = logical_monitor->number;
+  zoom_level_ptr = g_new (gdouble, 1);
+  *zoom_level_ptr = level;
+  g_hash_table_insert (display->monitor_zoom_levels, GINT_TO_POINTER(monitor_id), zoom_level_ptr);
+
+  /* Update global zoom active flag if any monitor has zoom active */
+  GHashTableIter iter;
+  gpointer key, value;
+  gboolean any_zoom_active = FALSE;
+
+  g_hash_table_iter_init (&iter, display->monitor_zoom_levels);
+  while (g_hash_table_iter_next (&iter, &key, &value))
+  {
+    gdouble *monitor_level = (gdouble*)value;
+    if (*monitor_level > 1.0)
+    {
+      any_zoom_active = TRUE;
+      break;
+    }
+  }
+  display->zoom_active = any_zoom_active;
+}
+
+/* Callback functions to handle zoom signals */
+static void
+on_zoom_scroll_in (MetaDisplay *display,
+                   gpointer     user_data)
+{
+  /* This callback will be connected to handle the zoom in signal */
+  /* Actual zoom application will happen in the compositor */
+}
+
+static void
+on_zoom_scroll_out (MetaDisplay *display,
+                    gpointer     user_data)
+{
+  /* This callback will be connected to handle the zoom out signal */
+  /* Actual zoom application will happen in the compositor */
+}
+
+static void
+on_zoom_reset (MetaDisplay *display,
+               gpointer     user_data)
+{
+  /* This callback will be connected to handle the zoom reset signal */
+  /* Actual zoom application will happen in the compositor */
+}
+
+/* Function to connect zoom signal handlers */
+void
+meta_display_connect_zoom_handlers (MetaDisplay *display)
+{
+  g_signal_connect (display, "zoom-scroll-in",
+                    G_CALLBACK (on_zoom_scroll_in), NULL);
+  g_signal_connect (display, "zoom-scroll-out",
+                    G_CALLBACK (on_zoom_scroll_out), NULL);
+  g_signal_connect (display, "zoom-reset",
+                    G_CALLBACK (on_zoom_reset), NULL);
 }
 
 /**
