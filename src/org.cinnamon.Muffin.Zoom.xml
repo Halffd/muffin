@@ -1,0 +1,81 @@
+<!DOCTYPE node PUBLIC
+'-//freedesktop//DTD D-BUS Object Introspection 1.0//EN'
+'http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd'>
+<node>
+
+  <!--
+      org.cinnamon.Muffin.Zoom:
+      @short_description: Zoom control interface
+
+      This interface provides methods to control accessibility zoom functionality.
+  -->
+  <interface name="org.cinnamon.Muffin.Zoom">
+
+    <!--
+        ZoomIn:
+        @level: The zoom level to set (optional, defaults to increasing current level by 1.6x)
+
+        Increases the zoom level.
+    -->
+    <method name="ZoomIn">
+      <arg type="d" name="level" direction="in" />
+    </method>
+
+    <!--
+        ZoomOut:
+        @level: The zoom level to set (optional, defaults to decreasing current level by 1.6x)
+
+        Decreases the zoom level.
+    -->
+    <method name="ZoomOut">
+      <arg type="d" name="level" direction="in" />
+    </method>
+
+    <!--
+        ResetZoom:
+        
+        Resets the zoom level to 1.0 (no zoom).
+    -->
+    <method name="ResetZoom">
+    </method>
+
+    <!--
+        SetZoomLevel:
+        @level: The zoom level to set
+
+        Sets the zoom level to a specific value.
+    -->
+    <method name="SetZoomLevel">
+      <arg type="d" name="level" direction="in" />
+    </method>
+
+    <!--
+        GetZoomLevel:
+        @level: The current zoom level
+
+        Gets the current zoom level.
+    -->
+    <method name="GetZoomLevel">
+      <arg type="d" name="level" direction="out" />
+    </method>
+
+    <!--
+        GetZoomActive:
+        @active: Whether zoom is currently active
+
+        Checks if zoom is currently active.
+    -->
+    <method name="GetZoomActive">
+      <arg type="b" name="active" direction="out" />
+    </method>
+
+    <!--
+        ToggleZoomMode:
+        
+        Toggles between different zoom modes.
+    -->
+    <method name="ToggleZoomMode">
+    </method>
+
+  </interface>
+</node>

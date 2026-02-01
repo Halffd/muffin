@@ -147,20 +147,24 @@ class Extension {
                     _createList: AltTab.WindowSwitcherPopup.prototype._createList
                 };
 
+                // Store references to original methods in closure variables
+                const originalSelect = this._altTabOriginalMethods.select;
+                const originalCreateList = this._altTabOriginalMethods._createList;
+
                 // Override AltTab.WindowSwitcherPopup methods
                 AltTab.WindowSwitcherPopup.prototype.select = function(backward, panelPosition) {
                     global.log('Extension: AltTab window selection intercepted');
-                    // Call original method if it exists
-                    if (this._altTabOriginalMethods.select) {
-                        return this._altTabOriginalMethods.select.call(this, backward, panelPosition);
+                    // Call original method using closure variable
+                    if (originalSelect) {
+                        return originalSelect.apply(this, arguments);
                     }
                 };
 
                 AltTab.WindowSwitcherPopup.prototype._createList = function() {
                     global.log('Extension: Creating AltTab window list');
-                    // Call original method if it exists
-                    if (this._altTabOriginalMethods._createList) {
-                        return this._altTabOriginalMethods._createList.call(this);
+                    // Call original method using closure variable
+                    if (originalCreateList) {
+                        return originalCreateList.apply(this, arguments);
                     }
                 };
 

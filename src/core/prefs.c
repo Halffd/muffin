@@ -2242,6 +2242,8 @@ meta_prefs_add_keybinding (const char           *name,
         }
 
       strokes = g_settings_get_strv (settings, name);
+      if (!strokes)
+        strokes = g_new0 (char *, 1);
     }
   else
     {
@@ -2255,6 +2257,8 @@ meta_prefs_add_keybinding (const char           *name,
           g_object_set_data (G_OBJECT (settings), name, GUINT_TO_POINTER (id));
 
           strokes = g_settings_get_strv (settings, name);
+      if (!strokes)
+        strokes = g_new0 (char *, 1);
         }
       else
         {
