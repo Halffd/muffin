@@ -26,6 +26,8 @@
 
 #include "backends/meta-backend-private.h"
 #include "clutter/clutter-muffin.h"
+#include "core/display-private.h"
+#include "meta/compositor-muffin.h"
 #include "meta/meta-backend.h"
 #include "meta/meta-monitor-manager.h"
 #include "meta/util.h"
@@ -228,16 +230,60 @@ meta_stage_paint_view (ClutterStage         *stage,
                        const cairo_region_t *redraw_clip)
 {
   MetaStage *meta_stage = META_STAGE (stage);
+  MetaBackend *backend = meta_get_backend ();
+  MetaDisplay *display = NULL;
+  MetaCompositor *compositor = NULL;
+  CoglFramebuffer *framebuffer = NULL;
+  gdouble view_zoom = 1.0;
+  gboolean zoom_applied = FALSE;
+
+  /* Try to get the compositor and query per-view zoom */
+  if (backend && backend->display)
+    {
+      display = backend->display;
+      if (display->compositor)
+        {
+          compositor = display->compositor;
+          view_zoom = meta_compositor_get_view_zoom (compositor, view);
+        }
+    }
 
   notify_watchers_for_mode (meta_stage, view, NULL,
                             META_STAGE_WATCH_BEFORE_PAINT);
 
-  /* NOTE: Per-view zoom application will be integrated here in the future.
-     For now, zoom is applied through the compositor's view zoom state
-     which gets queried during the render pipeline. */
+  /* Apply per-view zoom transform if active for this view */
+  if (view_zoom > 1.0 && compositor)
+    {
+      framebuffer = clutter_stage_view_get_framebuffer (view);
+      if (framebuffer)
+        {
+          MetaRectangle view_layout;
+          float center_x, center_y;
+
+          clutter_stage_view_get_layout (view, &view_layout);
+          center_x = view_layout.width / 2.0f;
+          center_y = view_layout.height / 2.0f;
+
+          /* Push matrix, apply zoom centered on view center, then paint */
+          cogl_framebuffer_push_matrix (framebuffer);
+          
+          /* Translate to center, scale, translate back */
+          cogl_framebuffer_translate (framebuffer, center_x, center_y, 0);
+          cogl_framebuffer_scale (framebuffer, view_zoom, view_zoom, 1.0f);
+          cogl_framebuffer_translate (framebuffer, -center_x, -center_y, 0);
+          
+          zoom_applied = TRUE;
+        }
+    }
 
   CLUTTER_STAGE_CLASS (meta_stage_parent_class)->paint_view (stage, view,
                                                              redraw_clip);
+
+  /* Pop the matrix if we applied zoom */
+  if (zoom_applied && framebuffer)
+    {
+      cogl_framebuffer_pop_matrix (framebuffer);
+    }
 
   notify_watchers_for_mode (meta_stage, view, NULL,
                             META_STAGE_WATCH_AFTER_PAINT);
