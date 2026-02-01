@@ -371,6 +371,93 @@ on_zoom_reset (MetaDisplay    *display,
   priv->view_zoom_active = FALSE;
 }
 
+/**
+ * Transform event coordinates through the inverse of the zoom transform
+ * so that applications receive coordinates in the unzoomed coordinate space.
+ * 
+ * This is called before events are processed by the window manager,
+ * to remap coordinates from the zoomed view back to screen coordinates.
+ */
+void
+meta_compositor_transform_event_coordinates (MetaCompositor *compositor,
+                                              ClutterEvent   *event)
+{
+  MetaDisplay *display;
+  MetaBackend *backend;
+  MetaRenderer *renderer;
+  GList *views, *l;
+  float event_x, event_y;
+
+  if (!event)
+    return;
+
+  /* Only transform pointer and touch events */
+  if (event->type != CLUTTER_BUTTON_PRESS &&
+      event->type != CLUTTER_BUTTON_RELEASE &&
+      event->type != CLUTTER_MOTION &&
+      event->type != CLUTTER_TOUCH_BEGIN &&
+      event->type != CLUTTER_TOUCH_UPDATE &&
+      event->type != CLUTTER_TOUCH_END &&
+      event->type != CLUTTER_SCROLL)
+    return;
+
+  display = meta_compositor_get_display (compositor);
+  if (!display)
+    return;
+
+  backend = meta_get_backend ();
+  renderer = meta_backend_get_renderer (backend);
+  
+  clutter_event_get_coords (event, &event_x, &event_y);
+
+  /* Find which view this event is in and apply inverse zoom transform */
+  views = meta_renderer_get_views (renderer);
+  for (l = views; l; l = l->next)
+    {
+      ClutterStageView *view = l->data;
+      MetaRectangle view_layout;
+      gdouble zoom;
+      float center_x, center_y;
+      float transformed_x, transformed_y;
+
+      clutter_stage_view_get_layout (view, &view_layout);
+
+      /* Check if event is within this view */
+      if (event_x >= view_layout.x &&
+          event_x < view_layout.x + view_layout.width &&
+          event_y >= view_layout.y &&
+          event_y < view_layout.y + view_layout.height)
+        {
+          zoom = get_view_zoom_level (compositor, view);
+          
+          if (zoom > 1.0)
+            {
+              /* Get view center in view-local coordinates */
+              center_x = view_layout.width / 2.0f;
+              center_y = view_layout.height / 2.0f;
+
+              /* Apply inverse zoom transform:
+               * 1. Translate event to view-local coords
+               * 2. Apply inverse zoom (divide by zoom)
+               * 3. Translate back to screen coords
+               */
+              float local_x = event_x - view_layout.x;
+              float local_y = event_y - view_layout.y;
+
+              transformed_x = (local_x - center_x) / zoom + center_x;
+              transformed_y = (local_y - center_y) / zoom + center_y;
+
+              transformed_x += view_layout.x;
+              transformed_y += view_layout.y;
+
+              /* Modify the event with transformed coordinates */
+              clutter_event_set_coords (event, transformed_x, transformed_y);
+            }
+          break;
+        }
+    }
+}
+
 
 /**
  * meta_get_stage_for_display:

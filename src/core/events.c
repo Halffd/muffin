@@ -32,6 +32,7 @@
 #include "core/keybindings-private.h"
 #include "core/window-private.h"
 #include "meta/meta-backend.h"
+#include "meta/compositor-muffin.h"
 #include "backends/meta-monitor-manager-private.h"
 
 #ifdef HAVE_NATIVE_BACKEND
@@ -526,6 +527,15 @@ event_callback (const ClutterEvent *event,
                 gpointer            data)
 {
   MetaDisplay *display = data;
+  MetaCompositor *compositor = display->compositor;
+
+  /* Transform event coordinates through per-view zoom before processing */
+  if (compositor && meta_compositor_is_view_zoom_active (compositor))
+    {
+      /* We need to cast away const for coordinate transformation */
+      ClutterEvent *mutable_event = (ClutterEvent *) event;
+      meta_compositor_transform_event_coordinates (compositor, mutable_event);
+    }
 
   return meta_display_handle_event (display, event);
 }

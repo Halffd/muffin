@@ -236,16 +236,14 @@ meta_stage_paint_view (ClutterStage         *stage,
   CoglFramebuffer *framebuffer = NULL;
   gdouble view_zoom = 1.0;
   gboolean zoom_applied = FALSE;
+  gboolean scissor_applied = FALSE;
 
   /* Try to get the compositor and query per-view zoom */
-  if (backend && backend->display)
+  display = meta_get_display();
+  if (display && display->compositor)
     {
-      display = backend->display;
-      if (display->compositor)
-        {
-          compositor = display->compositor;
-          view_zoom = meta_compositor_get_view_zoom (compositor, view);
-        }
+      compositor = display->compositor;
+      view_zoom = meta_compositor_get_view_zoom (compositor, view);
     }
 
   notify_watchers_for_mode (meta_stage, view, NULL,
@@ -273,11 +271,24 @@ meta_stage_paint_view (ClutterStage         *stage,
           cogl_framebuffer_translate (framebuffer, -center_x, -center_y, 0);
           
           zoom_applied = TRUE;
+
+          /* Apply scissor clipping to prevent popups/menus from rendering outside view bounds */
+          cogl_framebuffer_push_scissor_clip (framebuffer,
+                                              0, 0,
+                                              view_layout.width,
+                                              view_layout.height);
+          scissor_applied = TRUE;
         }
     }
 
   CLUTTER_STAGE_CLASS (meta_stage_parent_class)->paint_view (stage, view,
                                                              redraw_clip);
+
+  /* Pop the scissor if we applied it */
+  if (scissor_applied && framebuffer)
+    {
+      cogl_framebuffer_pop_clip (framebuffer);
+    }
 
   /* Pop the matrix if we applied zoom */
   if (zoom_applied && framebuffer)

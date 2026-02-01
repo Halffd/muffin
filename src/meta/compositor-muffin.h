@@ -76,5 +76,9 @@ void meta_compositor_set_view_zoom (MetaCompositor   *compositor,
 
 gboolean meta_compositor_is_view_zoom_active (MetaCompositor *compositor);
 
+/* Event coordinate transformation for per-view zoom */
+void meta_compositor_transform_event_coordinates (MetaCompositor *compositor,
+                                                   ClutterEvent   *event);
+
 #endif
 
