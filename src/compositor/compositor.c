@@ -57,6 +57,7 @@
 #include <X11/extensions/Xcomposite.h>
 
 #include "backends/meta-dnd-private.h"
+#include "backends/meta-monitor-manager-private.h"
 #include "backends/x11/meta-backend-x11.h"
 #include "backends/x11/meta-event-x11.h"
 #include "backends/x11/meta-stage-x11.h"
@@ -84,6 +85,7 @@
 #include "meta/prefs.h"
 #include "meta/window.h"
 #include "x11/meta-x11-display-private.h"
+#include "meta-zoom-controller.h"
 
 #ifdef HAVE_WAYLAND
 #include "compositor/meta-window-actor-wayland.h"
@@ -100,6 +102,32 @@ enum
 };
 
 static GParamSpec *obj_props[N_PROPS] = { NULL, };
+
+/* OUTPUT-SCOPED MAGNIFIER STRUCTURE
+ * 
+ * Represents a per-output magnifier that can be zoomed independently.
+ * Each MetaLogicalMonitor gets one of these when zoom is active.
+ * 
+ * Key fields:
+ * - output: The MetaLogicalMonitor this magnifier is associated with
+ * - zoom_factor: Current zoom level (1.0 = no zoom)
+ * - center_x/y: Center point for zoom (in output-local coordinates)
+ * - active: Whether this magnifier is currently active
+ * 
+ * Benefits over global zoom:
+ * - Each output truly independent
+ * - No cross-monitor effects
+ * - Damage can be scoped per-output
+ * - Efficient rendering (only affected output repaints)
+ */
+typedef struct _MetaOutputMagnifier
+{
+  MetaLogicalMonitor *output;     /* Back-reference to output */
+  double zoom_factor;              /* 1.0 = no zoom, 2.0 = 2x magnification */
+  float center_x, center_y;        /* Zoom center in output-local coords */
+  gboolean active;                 /* Is this magnifier active? */
+  cairo_region_t *damage_region;   /* Per-output damage (Stage 2) */
+} MetaOutputMagnifier;
 
 typedef struct _MetaCompositorPrivate
 {
@@ -136,9 +164,38 @@ typedef struct _MetaCompositorPrivate
 
   MetaPluginManager *plugin_mgr;
 
-  /* Per-view zoom state */
+  /* Per-view zoom state (DEPRECATED - for backwards compatibility) */
   GHashTable *view_zoom_levels;  /* key: ClutterStageView*, value: gdouble* */
   gboolean view_zoom_active;     /* Track if any view is zoomed */
+
+  /* OUTPUT-SCOPED ZOOM: Per-output magnifier state
+   *
+   * ARCHITECTURAL CHANGE: Moving from paint-time per-view zoom to output-scoped magnification.
+   * Key insight: Muffin treats monitors as viewports on ONE big canvas. Zoom applied in stage
+   * coordinates affects all monitors. Solution: Move zoom from stage space to per-output space.
+   *
+   * Each MetaLogicalMonitor now has independent zoom state, stored in output_magnifiers hash table.
+   * This enables true per-monitor zoom without cross-monitor interference.
+   *
+   * Stage 1: Output detection + per-output zoom application (~200 LOC)
+   *   - Get MetaLogicalMonitor for each view
+   *   - Store zoom per-output instead of per-view
+   *   - Apply zoom in output-local space, not stage space
+   *   - Hard clip to output rectangle
+   *
+   * Stage 2: Damage isolation (~150 LOC)
+   *   - Track damage per-output
+   *   - Scale damage by zoom factor
+   *   - Avoid redraw storms
+   *
+   * Stage 3: Refinement (~50 LOC)
+   *   - Test with multiple zoom levels
+   *   - Performance tuning
+   */
+  GHashTable *output_magnifiers; /* key: MetaLogicalMonitor*, value: MetaOutputMagnifier* */
+
+  /* ANIMATED ZOOM CONTROLLER */
+  MetaZoomController *zoom_controller; /* Controller for animated zoom transitions */
 } MetaCompositorPrivate;
 
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE (MetaCompositor, meta_compositor,
@@ -1653,6 +1710,22 @@ meta_compositor_init (MetaCompositor *compositor)
                                            meta_post_paint_func,
                                            compositor,
                                            NULL);
+
+  /* Initialize animated zoom controller */
+  priv->zoom_controller = meta_zoom_controller_new (compositor);
+}
+
+static void
+free_output_magnifier (gpointer data)
+{
+  MetaOutputMagnifier *magnifier = (MetaOutputMagnifier *) data;
+
+  if (magnifier)
+    {
+      if (magnifier->damage_region)
+        cairo_region_destroy (magnifier->damage_region);
+      g_free (magnifier);
+    }
 }
 
 static void
@@ -1681,6 +1754,11 @@ meta_compositor_dispose (GObject *object)
   g_clear_pointer (&priv->feedback_group, clutter_actor_destroy);
   g_clear_pointer (&priv->windows, g_list_free);
   g_clear_pointer (&priv->view_zoom_levels, g_hash_table_unref);
+
+  /* Use custom destroy function to properly free damage regions */
+  g_clear_pointer (&priv->output_magnifiers, g_hash_table_unref);
+
+  g_clear_object (&priv->zoom_controller);
 
   G_OBJECT_CLASS (meta_compositor_parent_class)->dispose (object);
 }
@@ -2096,3 +2174,360 @@ meta_compositor_is_view_zoom_active (MetaCompositor *compositor)
 
   return priv->view_zoom_active;
 }
+/* OUTPUT-SCOPED MAGNIFIER FUNCTIONS (Stage 1)
+ * 
+ * These functions implement per-output magnification instead of the previous
+ * per-view approach. Each output (MetaLogicalMonitor) can be zoomed independently.
+ */
+
+/**
+ * meta_compositor_get_magnifier_for_output:
+ * @compositor: A MetaCompositor
+ * @output: A MetaLogicalMonitor (can be NULL - function returns NULL)
+ * 
+ * Gets or creates a MetaOutputMagnifier for the given output.
+ * Returns NULL if output is NULL or if magnifier hasn't been created yet.
+ * 
+ * Stage 1: Just create/get the structure
+ * Stage 2: Add damage tracking
+ */
+static MetaOutputMagnifier *
+meta_compositor_get_magnifier_for_output (MetaCompositor   *compositor,
+                                          MetaLogicalMonitor *output)
+{
+  MetaCompositorPrivate *priv =
+    meta_compositor_get_instance_private (compositor);
+  MetaOutputMagnifier *magnifier;
+
+  if (!output)
+    return NULL;
+
+  if (!priv->output_magnifiers)
+    {
+      /* Initialize the hash table with output pointer as key */
+      priv->output_magnifiers = g_hash_table_new_full (g_direct_hash,
+                                                       g_direct_equal,
+                                                       NULL,
+                                                       free_output_magnifier);
+    }
+
+  magnifier = g_hash_table_lookup (priv->output_magnifiers, output);
+  if (!magnifier)
+    {
+      /* Create new magnifier for this output */
+      magnifier = g_new0 (MetaOutputMagnifier, 1);
+      magnifier->output = output;
+      magnifier->zoom_factor = 1.0;
+      magnifier->active = FALSE;
+      magnifier->damage_region = cairo_region_create ();
+      g_hash_table_insert (priv->output_magnifiers, output, magnifier);
+    }
+
+  return magnifier;
+}
+
+/**
+ * meta_compositor_set_output_zoom:
+ * @compositor: A MetaCompositor
+ * @output: A MetaLogicalMonitor
+ * @zoom: Zoom level (1.0 = no zoom, 2.0 = 2x magnification)
+ *
+ * Sets zoom level for a specific output.
+ * Stage 1: Just set the zoom factor
+ * Stage 2: Will also handle damage scaling and output detection
+ *
+ * NOTE: Font/layout issues remain because actors are allocated at normal size
+ * but rendered zoomed. A full solution would require applying zoom during
+ * the allocation phase (actor preferred size calculation), which would
+ * require deeper changes to Clutter's core allocation system.
+ */
+void
+meta_compositor_set_output_zoom (MetaCompositor     *compositor,
+                                  MetaLogicalMonitor *output,
+                                  gdouble            zoom)
+{
+  MetaOutputMagnifier *magnifier;
+
+  magnifier = meta_compositor_get_magnifier_for_output (compositor, output);
+  if (magnifier)
+    {
+      magnifier->zoom_factor = CLAMP (zoom, 1.0, 16.0);
+      magnifier->active = (magnifier->zoom_factor > 1.0);
+    }
+}
+
+/**
+ * meta_compositor_get_output_zoom:
+ * @compositor: A MetaCompositor
+ * @output: A MetaLogicalMonitor
+ * 
+ * Gets current zoom level for an output. Returns 1.0 if not zoomed.
+ */
+gdouble
+meta_compositor_get_output_zoom (MetaCompositor     *compositor,
+                                  MetaLogicalMonitor *output)
+{
+  MetaOutputMagnifier *magnifier;
+
+  magnifier = meta_compositor_get_magnifier_for_output (compositor, output);
+  if (magnifier)
+    return magnifier->zoom_factor;
+
+  return 1.0;
+}
+
+/**
+ * meta_compositor_get_logical_monitor_for_view:
+ * @compositor: A MetaCompositor
+ * @view: A ClutterStageView (MetaRendererView)
+ * 
+ * Gets the MetaLogicalMonitor associated with a view.
+ * This is Stage 1 critical: Maps rendering view to output for per-output zoom.
+ * 
+ * IMPLEMENTATION DETAIL:
+ * Views are created per MetaLogicalMonitor in meta_renderer.c (create_crtc_view).
+ * We need to extract the logical monitor from the view. Unfortunately, ClutterStageView
+ * doesn't expose the logical monitor directly. We use the view's layout geometry to
+ * find which output it belongs to.
+ * 
+ * Returns: MetaLogicalMonitor or NULL if not found
+ */
+MetaLogicalMonitor *
+meta_compositor_get_logical_monitor_for_view (MetaCompositor   *compositor,
+                                               ClutterStageView *view)
+{
+  MetaBackend *backend = meta_get_backend ();
+  MetaMonitorManager *monitor_manager;
+  GList *logical_monitors, *l;
+  MetaRectangle view_layout;
+
+  if (!view || !compositor)
+    return NULL;
+
+  monitor_manager = meta_backend_get_monitor_manager (backend);
+  if (!monitor_manager)
+    return NULL;
+
+  /* Get view's layout in stage coordinates */
+  clutter_stage_view_get_layout (view, &view_layout);
+
+  logical_monitors = meta_monitor_manager_get_logical_monitors (monitor_manager);
+
+  /* Find logical monitor that matches this view's position */
+  for (l = logical_monitors; l; l = l->next)
+    {
+      MetaLogicalMonitor *logical_monitor = l->data;
+
+      /* Check if view layout matches monitor layout
+       * MetaLogicalMonitor has a direct 'rect' field (MetaRectangle)
+       */
+      if (view_layout.x == logical_monitor->rect.x &&
+          view_layout.y == logical_monitor->rect.y &&
+          view_layout.width == logical_monitor->rect.width &&
+          view_layout.height == logical_monitor->rect.height)
+        {
+          return logical_monitor;
+        }
+    }
+
+  return NULL;
+}
+
+/* STAGE 2: DAMAGE ISOLATION AND SCALING
+ * 
+ * Per-output damage tracking to avoid redraw storms.
+ * When monitor B is zoomed, only B's damage region should be scaled,
+ * not global damage from all monitors.
+ */
+
+/**
+ * meta_compositor_extract_damage_for_output:
+ * @damage: Global damage region (can be NULL)
+ * @output: Target output
+ * 
+ * Extracts the portion of global damage that affects this specific output.
+ * Returns a new cairo_region_t with damage clipped to output bounds, or NULL.
+ * 
+ * Stage 2: Isolates damage to specific outputs.
+ */
+static cairo_region_t *
+meta_compositor_extract_damage_for_output (const cairo_region_t *damage,
+                                           MetaLogicalMonitor   *output)
+{
+  cairo_region_t *output_damage;
+
+  if (!damage || !output)
+    return NULL;
+
+  /* Create a region representing the output bounds */
+  cairo_rectangle_int_t output_rect = {
+    .x = output->rect.x,
+    .y = output->rect.y,
+    .width = output->rect.width,
+    .height = output->rect.height
+  };
+
+  /* Intersect global damage with output bounds
+   * This gives us only the damage that affects THIS output */
+  output_damage = cairo_region_create_rectangle (&output_rect);
+  if (output_damage)
+    {
+      cairo_region_intersect (output_damage, damage);
+      
+      /* If intersection is empty, return NULL instead of empty region */
+      if (cairo_region_is_empty (output_damage))
+        {
+          cairo_region_destroy (output_damage);
+          return NULL;
+        }
+    }
+
+  return output_damage;
+}
+
+/**
+ * meta_compositor_scale_damage_region:
+ * @damage: Damage region to scale (modified in-place)
+ * @zoom_factor: Zoom factor to apply
+ * @output: The logical monitor (for center point calculation)
+ *
+ * Scales damage region by zoom factor around the output center.
+ * This prevents clipping of zoomed content that extends beyond original bounds.
+ *
+ * Stage 2: Adjusts damage regions for zoomed rendering.
+ */
+static void
+meta_compositor_scale_damage_region (cairo_region_t     *damage,
+                                      gdouble            zoom_factor,
+                                      MetaLogicalMonitor *output)
+{
+  cairo_region_t *scaled_damage;
+  int n_rects, i;
+  double center_x, center_y;
+
+  if (!damage || zoom_factor <= 1.0 || !output)
+    return;
+
+  /* Calculate zoom center (in output space) */
+  center_x = output->rect.width / 2.0;
+  center_y = output->rect.height / 2.0;
+
+  /* Get number of rectangles in the region */
+  n_rects = cairo_region_num_rectangles (damage);
+
+  if (n_rects == 0)
+    return;
+
+  /* Create a new region for the scaled damage */
+  scaled_damage = cairo_region_create();
+
+  for (i = 0; i < n_rects; i++)
+    {
+      cairo_rectangle_int_t rect, scaled_rect;
+      double x, y, x2, y2;
+
+      /* Get the current rectangle */
+      cairo_region_get_rectangle (damage, i, &rect);
+
+      /* Convert to doubles for scaling math */
+      x = rect.x - center_x;
+      y = rect.y - center_y;
+      x2 = x + rect.width;
+      y2 = y + rect.height;
+
+      /* Scale around center */
+      x *= zoom_factor;
+      y *= zoom_factor;
+      x2 *= zoom_factor;
+      y2 *= zoom_factor;
+
+      /* Convert back to rect coordinates and add back center offset */
+      scaled_rect.x = (int)x + (int)center_x;
+      scaled_rect.y = (int)y + (int)center_y;
+      scaled_rect.width = (int)(x2 - x);
+      scaled_rect.height = (int)(y2 - y);
+
+      cairo_region_union_rectangle (scaled_damage, &scaled_rect);
+    }
+
+  /* Replace the original damage with the scaled version */
+  cairo_region_subtract (damage, damage);  /* Clear the original damage region */
+  cairo_region_union (damage, scaled_damage);      /* Then add the scaled rectangles */
+
+  /* Clean up */
+  cairo_region_destroy (scaled_damage);
+}
+
+/**
+ * meta_compositor_update_damage_for_output:
+ * @compositor: A MetaCompositor
+ * @output: Target output
+ * @damage: Global damage region
+ * 
+ * Updates per-output damage tracking with new global damage.
+ * Extracts output-specific damage and scales if zoomed.
+ * 
+ * Stage 2: Maintains per-output damage state.
+ */
+void
+meta_compositor_update_damage_for_output (MetaCompositor     *compositor,
+                                          MetaLogicalMonitor *output,
+                                          const cairo_region_t *damage)
+{
+  MetaOutputMagnifier *magnifier;
+  cairo_region_t *output_damage;
+  gdouble zoom_factor;
+
+  if (!output || !compositor)
+    return;
+
+  magnifier = meta_compositor_get_magnifier_for_output (compositor, output);
+  if (!magnifier)
+    return;
+
+  /* Extract damage specific to this output */
+  output_damage = meta_compositor_extract_damage_for_output (damage, output);
+
+  /* Update or replace the magnifier's damage region */
+  if (magnifier->damage_region)
+    cairo_region_destroy (magnifier->damage_region);
+
+  magnifier->damage_region = output_damage; /* May be NULL, which is valid */
+
+  /* If this output is zoomed, scale the damage accordingly
+   * This ensures the damage region reflects the zoomed rendering bounds */
+  zoom_factor = magnifier->zoom_factor;
+  if (zoom_factor > 1.0 && magnifier->damage_region)
+    {
+      meta_compositor_scale_damage_region (magnifier->damage_region,
+                                           zoom_factor,
+                                           output);
+    }
+}
+
+/**
+ * meta_compositor_get_damage_for_output:
+ * @compositor: A MetaCompositor
+ * @output: Target output
+ * 
+ * Gets the current damage region for this output.
+ * Returns a reference to the internal damage region (do NOT free).
+ * 
+ * Stage 2: Retrieve per-output damage for rendering.
+ */
+const cairo_region_t *
+meta_compositor_get_damage_for_output (MetaCompositor     *compositor,
+                                       MetaLogicalMonitor *output)
+{
+  MetaOutputMagnifier *magnifier;
+
+  if (!output || !compositor)
+    return NULL;
+
+  magnifier = meta_compositor_get_magnifier_for_output (compositor, output);
+  if (!magnifier)
+    return NULL;
+
+  return magnifier->damage_region;
+}
+

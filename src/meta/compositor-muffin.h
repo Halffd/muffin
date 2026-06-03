@@ -28,6 +28,9 @@
 #include "meta/meta-window-actor.h"
 #include "meta/types.h"
 
+/* Forward declarations for opaque types */
+typedef struct _MetaLogicalMonitor MetaLogicalMonitor;
+
 /* Public compositor API */
 META_EXPORT
 ClutterActor *meta_get_stage_for_display            (MetaDisplay *display);
@@ -66,7 +69,7 @@ ClutterActor *meta_get_x11_background_actor_for_display (MetaDisplay *display);
 META_EXPORT
 ClutterActor *meta_get_desklet_container_for_display (MetaDisplay *display);
 
-/* Per-view zoom API */
+/* Per-view zoom API (backwards compatibility) */
 gdouble meta_compositor_get_view_zoom (MetaCompositor   *compositor,
                                         ClutterStageView *view);
 
@@ -79,6 +82,39 @@ gboolean meta_compositor_is_view_zoom_active (MetaCompositor *compositor);
 /* Event coordinate transformation for per-view zoom */
 void meta_compositor_transform_event_coordinates (MetaCompositor *compositor,
                                                    ClutterEvent   *event);
+
+/* OUTPUT-SCOPED MAGNIFIER API (Stage 1)
+ * 
+ * New API for per-output zoom instead of per-view zoom.
+ * Each output (MetaLogicalMonitor) can be zoomed independently.
+ */
+gdouble meta_compositor_get_output_zoom (MetaCompositor     *compositor,
+                                          MetaLogicalMonitor *output);
+
+void meta_compositor_set_output_zoom (MetaCompositor     *compositor,
+                                       MetaLogicalMonitor *output,
+                                       gdouble            zoom);
+
+/* Internal helper for mapping views to logical monitors */
+META_EXPORT
+MetaLogicalMonitor *meta_compositor_get_logical_monitor_for_view (MetaCompositor   *compositor,
+                                                                    ClutterStageView *view);
+
+/* STAGE 2: Per-output damage isolation and scaling API
+ * 
+ * Functions for tracking and scaling damage per-output to avoid redraw storms.
+ * When zooming, damage regions need to be scaled to match the zoomed rendering.
+ */
+void meta_compositor_update_damage_for_output (MetaCompositor     *compositor,
+                                               MetaLogicalMonitor *output,
+                                               const cairo_region_t *damage);
+
+const cairo_region_t *
+meta_compositor_get_damage_for_output (MetaCompositor     *compositor,
+                                       MetaLogicalMonitor *output);
+
+
+
 
 #endif
 

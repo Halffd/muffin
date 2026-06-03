@@ -322,6 +322,8 @@ muffin_sources = [
   'compositor/meta-window-group.c',
   'compositor/meta-window-group-private.h',
   'compositor/meta-window-shape.c',
+  'compositor/meta-zoom-controller.c',
+  'compositor/meta-zoom-controller.h',
   'compositor/region-utils.c',
   'compositor/region-utils.h',
   'core/bell.c',
